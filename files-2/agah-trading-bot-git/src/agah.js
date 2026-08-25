@@ -115,9 +115,20 @@ async function getUserMarketWatches(env) {
   return Array.isArray(payload?.data) ? payload.data : [];
 }
 
+// Do not use /usermarketwatches as the token-validation gate.
+// Agah currently returns HTTP 500/HTML from that endpoint for some valid sessions.
+// The instrument catalog is a better authentication probe and is also the
+// endpoint used by the symbol-search/chart flow.
 export async function validateAgahAuth(env) {
-  const watches = await getUserMarketWatches(env);
-  return { ok: true, marketWatchCount: watches.length };
+  const auth = await getAuth(env);
+  const res = await fetch(INSTRUMENTS_URL, { headers: authHeaders(auth) });
+  if (res.status === 401) throw new Error("TOKEN_EXPIRED");
+  if (!res.ok) throw await readError(res, "InstrumentsWithNote");
+  const payload = await res.json();
+  if (payload?.isSuccess === false) throw new Error(`InstrumentsWithNote failed: ${JSON.stringify(payload)}`);
+  const csv = String(payload?.data || "");
+  if (!csv) throw new Error("InstrumentsWithNote returned empty data");
+  return { ok: true, marketWatchCount: null, catalogBytes: csv.length };
 }
 
 async function getMarketWatchInstrumentCatalog(env) {
