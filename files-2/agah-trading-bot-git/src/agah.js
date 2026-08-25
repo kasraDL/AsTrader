@@ -4,30 +4,60 @@
 
 const BASE = "https://tseonlineapi.agah.com/api/v1";
 const CHART_BASE = "https://tsembdpapi.agah.com/api/mbdp/v1";
+const WEB_ORIGIN = "https://online.agah.com";
 const INSTRUMENTS_URL = `${BASE}/instruments/InstrumentsWithNote`;
 const MARKET_WATCHES_URL = `${BASE}/usermarketwatches`;
 
 async function getAuth(env) {
-  const token = await env.BOT_KV.get("agah:token");
-  const userIdentifier = env.AGAH_USER_IDENTIFIER || (await env.BOT_KV.get("agah:userIdentifier"));
+  const [token, userIdentifier, storedDido] = await Promise.all([
+    env.BOT_KV.get("agah:token"),
+    env.BOT_KV.get("agah:userIdentifier"),
+    env.BOT_KV.get("agah:dido"),
+  ]);
+  const resolvedUserIdentifier = env.AGAH_USER_IDENTIFIER || userIdentifier;
   if (!token) throw new Error("NO_TOKEN");
-  return { token, userIdentifier };
+
+  let dido = env.AGAH_DIDO || storedDido || "";
+  if (!dido) {
+    dido = await bootstrapDido(env);
+  }
+  return { token, userIdentifier: resolvedUserIdentifier, dido };
 }
 
-function authHeaders({ token, userIdentifier }) {
+async function bootstrapDido(env) {
+  try {
+    const res = await fetch(`${WEB_ORIGIN}/auth/marketWatch`, {
+      headers: {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:154.0) Gecko/20100101 Firefox/154.0",
+      },
+    });
+    const setCookie = res.headers.get("set-cookie") || "";
+    const match = setCookie.match(/(?:^|[,;\\s])DIDO=([^;]+)/i);
+    const dido = match?.[1] || "";
+    if (dido) await env.BOT_KV.put("agah:dido", dido);
+    return dido;
+  } catch {
+    return "";
+  }
+}
+
+function authHeaders({ token, userIdentifier, dido }) {
   const h = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Authorization": `Bearer ${token}`,
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:154.0) Gecko/20100101 Firefox/154.0",
-    "Origin": "https://online.agah.com",
-    "Referer": "https://online.agah.com/",
+    "Origin": WEB_ORIGIN,
+    "Referer": `${WEB_ORIGIN}/`,
     "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "same-site",
   };
   if (userIdentifier) h["UserIdentifier"] = userIdentifier;
+  if (dido) h["Cookie"] = `DIDO=${dido}`;
   return h;
 }
 
@@ -193,7 +223,7 @@ export async function placeOrder(env, { categoryId, bankAccountId = 0, nscId, or
 
 export async function getAgahDiagnostics(env, nscId = "IRO1IKCO0001") {
   const auth = await getAuth(env);
-  const result = { tokenPresent: true, userIdentifierPresent: !!auth.userIdentifier, nscId, checks: {} };
+  const result = { tokenPresent: true, userIdentifierPresent: !!auth.userIdentifier, didoPresent: !!auth.dido, nscId, checks: {} };
   const now = Math.floor(Date.now() / 1000);
   const checks = [
     ["marketWatches", MARKET_WATCHES_URL],
