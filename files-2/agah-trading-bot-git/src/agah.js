@@ -77,16 +77,50 @@ function parseInstrumentCsv(csv, wantedNscId = null) {
   return null;
 }
 
-async function getInstrumentFromCatalog(env, nscId) {
+function parseInstrumentCsvMatches(csv, query, limit = 8) {
+  const lines = String(csv || "").split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return [];
+  const headers = parseCsvLine(lines[0]);
+  const index = Object.fromEntries(headers.map((h, i) => [h.trim(), i]));
+  const q = String(query || "").trim().toLocaleLowerCase("fa-IR");
+  const fields = [index.Name, index.CompanyName, index.NscId].filter((i) => i != null);
+  const results = [];
+  for (const line of lines.slice(1)) {
+    if (results.length >= limit) break;
+    const row = parseCsvLine(line);
+    const haystack = fields.map((i) => row[i] || "").join(" ").toLocaleLowerCase("fa-IR");
+    if (!haystack.includes(q)) continue;
+    results.push(Object.fromEntries(headers.map((h, i) => [h.trim(), row[i] ?? ""])));
+  }
+  return results;
+}
+
+async function getInstrumentCatalog(env) {
   const auth = await getAuth(env);
   const res = await fetch(INSTRUMENTS_URL, { headers: authHeaders(auth) });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
   if (!res.ok) throw await readError(res, "InstrumentsWithNote");
   const payload = await res.json();
   if (payload?.isSuccess === false) throw new Error(`InstrumentsWithNote failed: ${JSON.stringify(payload)}`);
-  const instrument = parseInstrumentCsv(payload?.data, nscId);
+  return String(payload?.data || "");
+}
+
+async function getInstrumentFromCatalog(env, nscId) {
+  const instrument = parseInstrumentCsv(await getInstrumentCatalog(env), nscId);
   if (!instrument) throw new Error(`instrument not found: ${nscId}`);
   return instrument;
+}
+
+export async function searchInstruments(env, query, limit = 8) {
+  const matches = parseInstrumentCsvMatches(await getInstrumentCatalog(env), query, limit);
+  return matches.map((instrument) => ({
+    symbol: instrument.Name || "",
+    name: instrument.CompanyName || "",
+    nscId: instrument.NscId || "",
+    marketTitle: instrument.MarketTitle || "",
+    instrumentGroupCode: instrument.InstrumentGroupCode || "",
+    tseId: instrument.TseId || "",
+  }));
 }
 
 // Captured real order traffic establishes the current category UUIDs:
@@ -201,9 +235,7 @@ export async function getAgahDiagnostics(env, nscId = "IRO1IKCO0001") {
 
   if (result.checks.instrumentCatalog?.ok) {
     try {
-      const res = await fetch(INSTRUMENTS_URL, { headers: authHeaders(auth) });
-      const payload = await res.json();
-      const instrument = parseInstrumentCsv(payload?.data, nscId);
+      const instrument = parseInstrumentCsv(await getInstrumentCatalog(env), nscId);
       result.instrument = instrument ? {
         symbol: instrument.Name || "",
         marketTitle: instrument.MarketTitle || "",
