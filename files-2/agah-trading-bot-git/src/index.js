@@ -1,4 +1,4 @@
-import { getAgahDiagnostics, getDailyCandles, getInstrumentQuote, getLiveSegmentation, placeOrder, searchInstruments, searchInstrumentsPublic } from "./agah.js";
+import { getAgahDiagnostics, getDailyCandles, getInstrumentQuote, getLiveSegmentation, placeOrder, searchInstruments, searchInstrumentsPublic, validateAgahAuth } from "./agah.js";
 import { smaCrossoverSignal } from "./signals.js";
 import { notify } from "./telegram.js";
 
@@ -10,8 +10,6 @@ export default {
     const url = new URL(request.url);
     if (!url.pathname.startsWith("/api/")) return new Response("not found", { status: 404 });
 
-    // Public, unauthenticated, read-only endpoints for external sites (symbols + quotes).
-    // These use the account's own stored token server-side, but need no dashboard key.
     if (url.pathname.startsWith("/api/public/")) {
       if (request.method === "OPTIONS") return corsJson(null, 204);
       try {
@@ -22,6 +20,14 @@ export default {
           const nscId = url.searchParams.get("nscId");
           if (!nscId) return corsJson({ error: "nscId required" }, 400);
           return corsJson(await getInstrumentQuote(env, nscId));
+        }
+        if (url.pathname === "/api/public/candles" && request.method === "GET") {
+          const nscId = url.searchParams.get("nscId");
+          if (!nscId) return corsJson({ error: "nscId required" }, 400);
+          const days = Math.min(Math.max(Number(url.searchParams.get("days") || 120), 5), 1000);
+          const toUnix = Math.floor(Date.now() / 1000);
+          const candles = await getDailyCandles(env, nscId, { fromUnix: toUnix - days * DAY, toUnix });
+          return corsJson({ nscId, candles });
         }
         return corsJson({ error: "not found" }, 404);
       } catch (err) {
@@ -37,12 +43,23 @@ export default {
         return json(await getState(env));
       }
       if (url.pathname === "/api/token" && request.method === "POST") {
-        const { token, userIdentifier } = await request.json();
+        const body = await request.json();
+        const token = String(body?.token || "").trim().replace(/^Bearer\s+/i, "").replace(/^['"]|['"]$/g, "").trim();
+        const userIdentifier = String(body?.userIdentifier || "").trim().replace(/^['"]|['"]$/g, "").trim();
         if (!token) return json({ error: "token required" }, 400);
+
         await env.BOT_KV.put("agah:token", token);
         if (userIdentifier) await env.BOT_KV.put("agah:userIdentifier", userIdentifier);
-        await log(env, "توکن جدید ذخیره شد.");
-        return json({ ok: true });
+        else await env.BOT_KV.delete("agah:userIdentifier");
+
+        try {
+          const validation = await validateAgahAuth(env);
+          await log(env, "توکن جدید ذخیره و اعتبارسنجی شد.");
+          return json({ ok: true, validated: true, ...validation });
+        } catch (err) {
+          await log(env, `⚠️ توکن ذخیره شد ولی اعتبارسنجی آگاه ناموفق بود: ${err.message}`);
+          return json({ ok: false, stored: true, validated: false, error: err.message }, err.message === "TOKEN_EXPIRED" ? 401 : 502);
+        }
       }
       if (url.pathname === "/api/diagnostics/agah" && request.method === "GET") {
         const nscId = url.searchParams.get("nscId") || "IRO1IKCO0001";
@@ -78,13 +95,12 @@ function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 }
 
-// Same as json(), but with CORS headers so any site (your own included) can call it directly.
 function corsJson(data, status = 200) {
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
-    "Cache-Control": "public, max-age=15", // light caching so a busy site doesn't hammer Agah on every load
+    "Cache-Control": "public, max-age=15",
   };
   if (data === null) return new Response(null, { status, headers });
   return new Response(JSON.stringify(data), { status, headers: { ...headers, "Content-Type": "application/json" } });
@@ -158,13 +174,7 @@ async function handleWatchlist(env, body) {
   if (body.action === "add") {
     if (!body.nscId || !body.categoryId || !body.quantity) throw new Error("nscId, categoryId, quantity required");
     const filtered = list.filter((w) => w.nscId !== body.nscId);
-    filtered.push({
-      nscId: body.nscId,
-      categoryId: body.categoryId,
-      quantity: Number(body.quantity),
-      symbol: body.symbol || body.nscId,
-      name: body.name || "",
-    });
+    filtered.push({ nscId: body.nscId, categoryId: body.categoryId, quantity: Number(body.quantity), symbol: body.symbol || body.nscId, name: body.name || "" });
     await env.BOT_KV.put("watchlist", JSON.stringify(filtered));
     await log(env, `${body.symbol || body.nscId} به واچ‌لیست اضافه شد.`);
   } else if (body.action === "remove") {
@@ -195,13 +205,7 @@ async function handleSignalAction(env, id, action) {
   }
 
   try {
-    const result = await placeOrder(env, {
-      categoryId: pending.categoryId,
-      nscId: pending.nscId,
-      orderSide: pending.side === "buy" ? 1 : 2,
-      price: pending.price,
-      quantity: pending.quantity,
-    });
+    const result = await placeOrder(env, { categoryId: pending.categoryId, nscId: pending.nscId, orderSide: pending.side === "buy" ? 1 : 2, price: pending.price, quantity: pending.quantity });
     await log(env, `✅ سفارش ${pending.nscId} ثبت شد (decisionId: ${result?.data?.decisionId ?? "?"}).`);
     return { ok: true, result };
   } catch (err) {
@@ -227,16 +231,7 @@ async function runSignalCheck(env) {
 
       const lastClose = candles[candles.length - 1].last;
       const signalId = crypto.randomUUID();
-      const pending = {
-        nscId: item.nscId,
-        categoryId: item.categoryId,
-        quantity: item.quantity,
-        price: lastClose,
-        side: result.signal,
-        reason: result.reason,
-        symbol: item.symbol || item.nscId,
-        name: item.name || "",
-      };
+      const pending = { nscId: item.nscId, categoryId: item.categoryId, quantity: item.quantity, price: lastClose, side: result.signal, reason: result.reason, symbol: item.symbol || item.nscId, name: item.name || "" };
       await env.BOT_KV.put(`pending:${signalId}`, JSON.stringify(pending), { expirationTtl: 3600 });
       await log(env, `📊 سیگنال ${result.signal === "buy" ? "خرید" : "فروش"} برای ${item.symbol || item.nscId} ثبت شد.`);
       await notify(env, `سیگنال جدید: ${item.symbol || item.nscId} (${result.signal}) - داشبورد رو چک کن.`);
