@@ -4,6 +4,7 @@ import { notify } from "./telegram.js";
 
 const DAY = 86400;
 const MAX_LOG = 50;
+const PENDING_INDEX_KEY = "pending:index";
 
 export default {
   async fetch(request, env, ctx) {
@@ -125,19 +126,39 @@ async function log(env, text) {
 }
 
 async function getState(env) {
-  const [token, watchlistRaw, logRaw] = await Promise.all([
+  const [token, watchlistRaw, logRaw, pendingIndexRaw] = await Promise.all([
     env.BOT_KV.get("agah:token"),
     env.BOT_KV.get("watchlist"),
     env.BOT_KV.get("log"),
+    env.BOT_KV.get(PENDING_INDEX_KEY),
   ]);
   const watchlist = JSON.parse(watchlistRaw || "[]");
-  const list = await env.BOT_KV.list({ prefix: "pending:" });
+  const pendingIds = JSON.parse(pendingIndexRaw || "[]");
   const pending = [];
-  for (const k of list.keys) {
-    const raw = await env.BOT_KV.get(k.name);
-    if (raw) pending.push({ id: k.name.replace("pending:", ""), ...JSON.parse(raw) });
+  const validIds = [];
+  for (const id of pendingIds) {
+    const raw = await env.BOT_KV.get(`pending:${id}`);
+    if (raw) {
+      pending.push({ id, ...JSON.parse(raw) });
+      validIds.push(id);
+    }
+  }
+  if (validIds.length !== pendingIds.length) {
+    await env.BOT_KV.put(PENDING_INDEX_KEY, JSON.stringify(validIds));
   }
   return { hasToken: !!token, watchlist, pending, log: JSON.parse(logRaw || "[]") };
+}
+
+async function addPendingId(env, id) {
+  const ids = JSON.parse((await env.BOT_KV.get(PENDING_INDEX_KEY)) || "[]");
+  if (!ids.includes(id)) ids.push(id);
+  await env.BOT_KV.put(PENDING_INDEX_KEY, JSON.stringify(ids.slice(-100)));
+}
+
+async function removePendingId(env, id) {
+  const ids = JSON.parse((await env.BOT_KV.get(PENDING_INDEX_KEY)) || "[]");
+  const next = ids.filter((item) => item !== id);
+  await env.BOT_KV.put(PENDING_INDEX_KEY, JSON.stringify(next));
 }
 
 async function searchSymbols(env, query) {
@@ -191,6 +212,7 @@ async function handleSignalAction(env, id, action) {
   if (!raw) return { error: "signal not found or expired" };
   const pending = JSON.parse(raw);
   await env.BOT_KV.delete(`pending:${id}`);
+  await removePendingId(env, id);
 
   if (action === "reject") {
     await log(env, `❌ سیگنال ${pending.nscId} (${pending.side}) رد شد.`);
@@ -233,6 +255,7 @@ async function runSignalCheck(env) {
       const signalId = crypto.randomUUID();
       const pending = { nscId: item.nscId, categoryId: item.categoryId, quantity: item.quantity, price: lastClose, side: result.signal, reason: result.reason, symbol: item.symbol || item.nscId, name: item.name || "" };
       await env.BOT_KV.put(`pending:${signalId}`, JSON.stringify(pending), { expirationTtl: 3600 });
+      await addPendingId(env, signalId);
       await log(env, `📊 سیگنال ${result.signal === "buy" ? "خرید" : "فروش"} برای ${item.symbol || item.nscId} ثبت شد.`);
       await notify(env, `سیگنال جدید: ${item.symbol || item.nscId} (${result.signal}) - داشبورد رو چک کن.`);
     } catch (err) {
