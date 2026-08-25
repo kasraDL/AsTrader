@@ -1,10 +1,9 @@
-import { getAgahDiagnostics, getDailyCandles, getLiveSegmentation, placeOrder } from "./agah.js";
+import { getAgahDiagnostics, getDailyCandles, getLiveSegmentation, placeOrder, searchInstruments } from "./agah.js";
 import { smaCrossoverSignal } from "./signals.js";
 import { notify } from "./telegram.js";
 
 const DAY = 86400;
 const MAX_LOG = 50;
-const TSETMC_SEARCH = "https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/";
 
 export default {
   async fetch(request, env, ctx) {
@@ -91,57 +90,29 @@ async function searchSymbols(env, query) {
   const q = query.trim();
   if (q.length < 2) return { results: [] };
 
-  const res = await fetch(`${TSETMC_SEARCH}${encodeURIComponent(q)}`, {
-    headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0 AsTrader/1.0" },
-  });
-  if (!res.ok) throw new Error(`symbol search failed: ${res.status}`);
-  const data = await res.json();
-  const raw = Array.isArray(data?.instrumentSearch) ? data.instrumentSearch : [];
-
+  const raw = await searchInstruments(env, q, 8);
   const results = [];
-  for (const item of raw.slice(0, 8)) {
-    const nscId = item.cIsin || item.isin || item.nscId || "";
+  for (const item of raw) {
     let categoryId = null;
     let categoryError = null;
-    if (nscId) {
-      try {
-        const segmentation = await getLiveSegmentation(env, nscId);
-        categoryId = findCategoryId(segmentation);
-      } catch (err) {
-        categoryError = err.message;
-      }
+    try {
+      const segmentation = await getLiveSegmentation(env, item.nscId);
+      categoryId = segmentation.categoryId;
+    } catch (err) {
+      categoryError = err.message;
     }
     results.push({
-      symbol: item.lVal18AFC || "",
-      name: item.lVal30 || "",
-      nscId,
+      symbol: item.symbol,
+      name: item.name,
+      nscId: item.nscId,
       categoryId,
       categoryError,
-      flow: item.flow ?? null,
-      flowTitle: item.flowTitle || "",
-      insCode: item.insCode || "",
+      marketTitle: item.marketTitle,
+      instrumentGroupCode: item.instrumentGroupCode,
+      tseId: item.tseId,
     });
   }
   return { results };
-}
-
-function findCategoryId(value) {
-  if (!value || typeof value !== "object") return null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findCategoryId(item);
-      if (found !== null) return found;
-    }
-    return null;
-  }
-  for (const [key, val] of Object.entries(value)) {
-    if (/^categoryid$/i.test(key) && (typeof val === "string" || typeof val === "number")) return String(val);
-  }
-  for (const val of Object.values(value)) {
-    const found = findCategoryId(val);
-    if (found !== null) return found;
-  }
-  return null;
 }
 
 async function handleWatchlist(env, body) {
