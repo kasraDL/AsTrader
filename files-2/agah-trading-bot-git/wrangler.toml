@@ -2,31 +2,17 @@ name = "agah-trading-bot"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
 
-# --- Static dashboard (public/index.html) served directly by Cloudflare. ---
-# Only /api/* is routed to the Worker code; everything else is the static file.
+[[kv_namespaces]]
+binding = "BOT_KV"
+id = "aeaa1747800d4c68b20906a1d70dc6c7"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
 run_worker_first = ["/api/*"]
 
-# --- KV namespace for storing token / watchlist / pending signals / log ---
-# Create it with: npx wrangler kv namespace create BOT_KV
-# then paste the returned id below.
-kv_namespaces = [
-  { binding = "BOT_KV", id = "REPLACE_WITH_KV_ID" }
-]
-
-# --- Cron: run the price/signal check every 5 minutes during market hours ---
-# Tehran market ~ 09:00-12:30 Iran time. Adjust as needed (cron is UTC).
 [triggers]
-crons = ["*/5 6-9 * * 0-4"]
-
-# --- Secrets (do NOT put these here, set with `wrangler secret put NAME`) ---
-# DASHBOARD_PASSWORD    -> the password you'll type into the web app to log in (required)
-# AGAH_USER_IDENTIFIER  -> the "UserIdentifier" header value seen in the HAR (static per device)
-# TELEGRAM_BOT_TOKEN    -> optional, only if you want push pings for new signals
-# TELEGRAM_CHAT_ID      -> optional, goes with TELEGRAM_BOT_TOKEN
+crons = ["*/5 6-9 * * 1-5"]
 
 [vars]
-# Safety guard - hard limit enforced in code regardless of what a signal says
-MAX_ORDER_VALUE_RIAL = "50000000"   # e.g. 50,000,000 Rial cap per single order - TUNE THIS
+MAX_ORDER_VALUE_RIAL = "50000000"
