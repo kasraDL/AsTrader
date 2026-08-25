@@ -1,15 +1,15 @@
 // Thin client around the (unofficial, reverse-engineered) Agah online trading API.
 // Auth is handled OUTSIDE this bot: you log in manually in the browser (captcha +
 // device-fingerprint are intentionally hard to automate), then send the fresh
-// Bearer token to the bot via the /settoken Telegram command. This module just
-// uses whatever token is currently stored in KV.
+// Bearer token to the bot via the dashboard. This module just uses whatever token
+// is currently stored in KV.
 
 const BASE = "https://tseonlineapi.agah.com/api/v1";
 
 async function getAuth(env) {
   const token = await env.BOT_KV.get("agah:token");
   const userIdentifier = env.AGAH_USER_IDENTIFIER || (await env.BOT_KV.get("agah:userIdentifier"));
-  if (!token) throw new Error("NO_TOKEN"); // caller should tell the user to /settoken
+  if (!token) throw new Error("NO_TOKEN");
   return { token, userIdentifier };
 }
 
@@ -30,16 +30,15 @@ export async function getLiveSegmentation(env, nscId) {
     headers: authHeaders(auth),
   });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
-  if (!res.ok) throw new Error(`live-segmentation failed: ${res.status}`);
+  if (!res.ok) {
+    const errorBody = await res.text();
+    throw new Error(`live-segmentation failed: ${res.status} ${errorBody.slice(0, 2000)}`);
+  }
   return res.json();
 }
 
 const CHART_BASE = "https://tsembdpapi.agah.com/api/mbdp/v1";
 
-// Daily OHLCV candles (TradingView-UDF-style), confirmed working in the captured
-// traffic. symbol is "<nscId>-2", resolution "1D". Returns candles:
-// [{ first, high, last, low, quantity, change, since, realSince }, ...]
-// first=open, last=close, quantity=volume.
 export async function getDailyCandles(env, nscId, { fromUnix, toUnix }) {
   const auth = await getAuth(env);
   const symbol = `${nscId}-2`;
@@ -61,8 +60,8 @@ export async function getDelegatedBankAccounts(env) {
   return res.json();
 }
 
-// orderSide: 1 = buy, 2 = sell (as observed in the captured traffic)
-// validityType: 1 = day order (as observed)
+// orderSide: 1 = buy, 2 = sell
+// validityType: 1 = day order
 export async function placeOrder(env, { categoryId, bankAccountId = 0, nscId, orderSide, price, quantity, validityType = 1 }) {
   const auth = await getAuth(env);
   const body = {
