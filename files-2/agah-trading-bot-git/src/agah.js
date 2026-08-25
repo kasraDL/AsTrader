@@ -6,6 +6,7 @@
 
 const BASE = "https://tseonlineapi.agah.com/api/v1";
 const CHART_BASE = "https://tsembdpapi.agah.com/api/mbdp/v1";
+const INSTRUMENTS_URL = `${BASE}/instruments/InstrumentsWithNote`;
 
 async function getAuth(env) {
   const token = await env.BOT_KV.get("agah:token");
@@ -18,10 +19,14 @@ function authHeaders({ token, userIdentifier }) {
   const h = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
     "Authorization": `Bearer ${token}`,
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:154.0) Gecko/20100101 Firefox/154.0",
     "Origin": "https://online.agah.com",
     "Referer": "https://online.agah.com/",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
   };
   if (userIdentifier) h["UserIdentifier"] = userIdentifier;
   return h;
@@ -32,15 +37,78 @@ async function readError(res, label) {
   return new Error(`${label} failed: ${res.status} ${body.slice(0, 2000)}`);
 }
 
-// nscId e.g. "IRO1IKCO0001"
-export async function getLiveSegmentation(env, nscId) {
+function parseCsvLine(line) {
+  const out = [];
+  let field = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (quoted && line[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (ch === "," && !quoted) {
+      out.push(field);
+      field = "";
+    } else {
+      field += ch;
+    }
+  }
+  out.push(field);
+  return out;
+}
+
+function parseInstrumentCsv(csv, wantedNscId = null) {
+  const lines = String(csv || "").split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return null;
+  const headers = parseCsvLine(lines[0]);
+  const index = Object.fromEntries(headers.map((h, i) => [h.trim(), i]));
+  const nscIndex = index.NscId;
+  if (nscIndex == null) return null;
+
+  for (const line of lines.slice(1)) {
+    const row = parseCsvLine(line);
+    if (wantedNscId && row[nscIndex] !== wantedNscId) continue;
+    return Object.fromEntries(headers.map((h, i) => [h.trim(), row[i] ?? ""]));
+  }
+  return null;
+}
+
+async function getInstrumentFromCatalog(env, nscId) {
   const auth = await getAuth(env);
-  const res = await fetch(`${BASE}/instruments/live-segmentation/${nscId}`, {
-    headers: authHeaders(auth),
-  });
+  const res = await fetch(INSTRUMENTS_URL, { headers: authHeaders(auth) });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
-  if (!res.ok) throw await readError(res, "live-segmentation");
-  return res.json();
+  if (!res.ok) throw await readError(res, "InstrumentsWithNote");
+  const payload = await res.json();
+  if (payload?.isSuccess === false) throw new Error(`InstrumentsWithNote failed: ${JSON.stringify(payload)}`);
+  const instrument = parseInstrumentCsv(payload?.data, nscId);
+  if (!instrument) throw new Error(`instrument not found: ${nscId}`);
+  return instrument;
+}
+
+// Captured real order traffic establishes the current category UUIDs:
+// بورس -> 272de7e4-5c65-463a-92c2-535e2caa30fe
+// فرابورس -> 0be2ade7-d826-4760-920c-fc4b6b96d427
+function categoryIdFromMarketTitle(marketTitle) {
+  const market = String(marketTitle || "").trim();
+  if (market === "بورس") return "272de7e4-5c65-463a-92c2-535e2caa30fe";
+  if (market === "فرابورس" || market === "پایه فرابورس") return "0be2ade7-d826-4760-920c-fc4b6b96d427";
+  return null;
+}
+
+export async function getLiveSegmentation(env, nscId) {
+  const instrument = await getInstrumentFromCatalog(env, nscId);
+  const categoryId = categoryIdFromMarketTitle(instrument.MarketTitle);
+  if (!categoryId) throw new Error(`category not mapped for market: ${instrument.MarketTitle || "unknown"}`);
+  return {
+    nscId,
+    marketTitle: instrument.MarketTitle || "",
+    categoryId,
+    instrument,
+  };
 }
 
 export async function getDailyCandles(env, nscId, { fromUnix, toUnix }) {
@@ -106,7 +174,7 @@ export async function getAgahDiagnostics(env, nscId = "IRO1IKCO0001") {
   };
 
   const checks = [
-    ["segmentation", `${BASE}/instruments/live-segmentation/${nscId}`],
+    ["instrumentCatalog", INSTRUMENTS_URL],
     ["bankAccounts", `${BASE}/financialAccounts/delegatedBankAccounts`],
   ];
 
@@ -128,6 +196,21 @@ export async function getAgahDiagnostics(env, nscId = "IRO1IKCO0001") {
       };
     } catch (err) {
       result.checks[name] = { networkError: err.message };
+    }
+  }
+
+  if (result.checks.instrumentCatalog?.ok) {
+    try {
+      const res = await fetch(INSTRUMENTS_URL, { headers: authHeaders(auth) });
+      const payload = await res.json();
+      const instrument = parseInstrumentCsv(payload?.data, nscId);
+      result.instrument = instrument ? {
+        symbol: instrument.Name || "",
+        marketTitle: instrument.MarketTitle || "",
+        categoryId: categoryIdFromMarketTitle(instrument.MarketTitle),
+      } : null;
+    } catch (err) {
+      result.instrumentError = err.message;
     }
   }
 
