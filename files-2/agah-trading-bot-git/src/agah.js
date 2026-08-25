@@ -1,12 +1,11 @@
 // Thin client around the (unofficial, reverse-engineered) Agah online trading API.
-// Auth is handled OUTSIDE this bot: you log in manually in the browser (captcha +
-// device-fingerprint are intentionally hard to automate), then send the fresh
-// Bearer token to the bot via the dashboard. This module just uses whatever token
-// is currently stored in KV.
+// Auth is handled OUTSIDE this bot: you log in manually in the browser, then send
+// the fresh Bearer token to the bot via the dashboard.
 
 const BASE = "https://tseonlineapi.agah.com/api/v1";
 const CHART_BASE = "https://tsembdpapi.agah.com/api/mbdp/v1";
 const INSTRUMENTS_URL = `${BASE}/instruments/InstrumentsWithNote`;
+const MARKET_WATCHES_URL = `${BASE}/usermarketwatches`;
 
 async function getAuth(env) {
   const token = await env.BOT_KV.get("agah:token");
@@ -44,18 +43,11 @@ function parseCsvLine(line) {
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (ch === '"') {
-      if (quoted && line[i + 1] === '"') {
-        field += '"';
-        i++;
-      } else {
-        quoted = !quoted;
-      }
+      if (quoted && line[i + 1] === '"') { field += '"'; i++; }
+      else quoted = !quoted;
     } else if (ch === "," && !quoted) {
-      out.push(field);
-      field = "";
-    } else {
-      field += ch;
-    }
+      out.push(field); field = "";
+    } else field += ch;
   }
   out.push(field);
   return out;
@@ -68,7 +60,6 @@ function parseInstrumentCsv(csv, wantedNscId = null) {
   const index = Object.fromEntries(headers.map((h, i) => [h.trim(), i]));
   const nscIndex = index.NscId;
   if (nscIndex == null) return null;
-
   for (const line of lines.slice(1)) {
     const row = parseCsvLine(line);
     if (wantedNscId && row[nscIndex] !== wantedNscId) continue;
@@ -89,13 +80,46 @@ function parseInstrumentCsvMatches(csv, query, limit = 8) {
     if (results.length >= limit) break;
     const row = parseCsvLine(line);
     const haystack = fields.map((i) => row[i] || "").join(" ").toLocaleLowerCase("fa-IR");
-    if (!haystack.includes(q)) continue;
-    results.push(Object.fromEntries(headers.map((h, i) => [h.trim(), row[i] ?? ""])));
+    if (haystack.includes(q)) results.push(Object.fromEntries(headers.map((h, i) => [h.trim(), row[i] ?? ""])));
   }
   return results;
 }
 
+async function getUserMarketWatches(env) {
+  const auth = await getAuth(env);
+  const res = await fetch(MARKET_WATCHES_URL, { headers: authHeaders(auth) });
+  if (res.status === 401) throw new Error("TOKEN_EXPIRED");
+  if (!res.ok) throw await readError(res, "usermarketwatches");
+  const payload = await res.json();
+  if (payload?.isSuccess === false) throw new Error(`usermarketwatches failed: ${JSON.stringify(payload)}`);
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
+async function getMarketWatchInstrumentCatalog(env) {
+  const watches = await getUserMarketWatches(env);
+  const watch = watches.find((w) => w?.includeAssetInstruments === true && Number(w?.id) > 0) || watches.find((w) => Number(w?.id) > 0);
+  if (!watch) throw new Error("no market watch available");
+
+  const auth = await getAuth(env);
+  const url = `${BASE}/usermarketwatches/${encodeURIComponent(watch.id)}/instruments/csv`;
+  const res = await fetch(url, { headers: authHeaders(auth) });
+  if (res.status === 401) throw new Error("TOKEN_EXPIRED");
+  if (!res.ok) throw await readError(res, "market-watch instruments csv");
+  const payload = await res.json();
+  if (payload?.isSuccess === false) throw new Error(`market-watch instruments csv failed: ${JSON.stringify(payload)}`);
+  return String(payload?.data || "");
+}
+
 async function getInstrumentCatalog(env) {
+  // This is the endpoint the current Agah web client actually uses for the
+  // user's instrument universe. InstrumentsWithNote is retained as fallback.
+  try {
+    const csv = await getMarketWatchInstrumentCatalog(env);
+    if (csv.includes("NscId") && csv.includes("MarketTitle")) return csv;
+  } catch (err) {
+    if (err.message === "TOKEN_EXPIRED" || err.message === "NO_TOKEN") throw err;
+  }
+
   const auth = await getAuth(env);
   const res = await fetch(INSTRUMENTS_URL, { headers: authHeaders(auth) });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
@@ -123,9 +147,6 @@ export async function searchInstruments(env, query, limit = 8) {
   }));
 }
 
-// Captured real order traffic establishes the current category UUIDs:
-// بورس -> 272de7e4-5c65-463a-92c2-535e2caa30fe
-// فرابورس -> 0be2ade7-d826-4760-920c-fc4b6b96d427
 function categoryIdFromMarketTitle(marketTitle) {
   const market = String(marketTitle || "").trim();
   if (market === "بورس") return "272de7e4-5c65-463a-92c2-535e2caa30fe";
@@ -137,12 +158,7 @@ export async function getLiveSegmentation(env, nscId) {
   const instrument = await getInstrumentFromCatalog(env, nscId);
   const categoryId = categoryIdFromMarketTitle(instrument.MarketTitle);
   if (!categoryId) throw new Error(`category not mapped for market: ${instrument.MarketTitle || "unknown"}`);
-  return {
-    nscId,
-    marketTitle: instrument.MarketTitle || "",
-    categoryId,
-    instrument,
-  };
+  return { nscId, marketTitle: instrument.MarketTitle || "", categoryId, instrument };
 }
 
 export async function getDailyCandles(env, nscId, { fromUnix, toUnix }) {
@@ -158,93 +174,51 @@ export async function getDailyCandles(env, nscId, { fromUnix, toUnix }) {
 
 export async function getDelegatedBankAccounts(env) {
   const auth = await getAuth(env);
-  const res = await fetch(`${BASE}/financialAccounts/delegatedBankAccounts`, {
-    headers: authHeaders(auth),
-  });
+  const res = await fetch(`${BASE}/financialAccounts/delegatedBankAccounts`, { headers: authHeaders(auth) });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
   if (!res.ok) throw await readError(res, "delegatedBankAccounts");
   return res.json();
 }
 
-// orderSide: 1 = buy, 2 = sell
-// validityType: 1 = day order
 export async function placeOrder(env, { categoryId, bankAccountId = 0, nscId, orderSide, price, quantity, validityType = 1 }) {
   const auth = await getAuth(env);
-  const body = {
-    categoryId,
-    bankAccountId,
-    disclosedQuantity: null,
-    nscId,
-    orderSide,
-    price,
-    quantity,
-    validityType,
-    minimumQuantity: null,
-    validityDate: null,
-    creationDate: new Date().toISOString(),
-  };
-  const res = await fetch(`${BASE}/order`, {
-    method: "POST",
-    headers: authHeaders(auth),
-    body: JSON.stringify(body),
-  });
+  const body = { categoryId, bankAccountId, disclosedQuantity: null, nscId, orderSide, price, quantity, validityType, minimumQuantity: null, validityDate: null, creationDate: new Date().toISOString() };
+  const res = await fetch(`${BASE}/order`, { method: "POST", headers: authHeaders(auth), body: JSON.stringify(body) });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
   if (!res.ok) throw await readError(res, "order");
   const data = await res.json();
-  if (data.isSuccess === false) {
-    throw new Error(`order failed: ${JSON.stringify(data)}`);
-  }
+  if (data.isSuccess === false) throw new Error(`order failed: ${JSON.stringify(data)}`);
   return data;
 }
 
-// Authenticated connectivity diagnostics. Never returns the Bearer token itself.
 export async function getAgahDiagnostics(env, nscId = "IRO1IKCO0001") {
   const auth = await getAuth(env);
-  const result = {
-    tokenPresent: true,
-    userIdentifierPresent: !!auth.userIdentifier,
-    nscId,
-    checks: {},
-  };
-
-  const checks = [
-    ["instrumentCatalog", INSTRUMENTS_URL],
-    ["bankAccounts", `${BASE}/financialAccounts/delegatedBankAccounts`],
-  ];
-
+  const result = { tokenPresent: true, userIdentifierPresent: !!auth.userIdentifier, nscId, checks: {} };
   const now = Math.floor(Date.now() / 1000);
-  checks.push([
-    "history",
-    `${CHART_BASE}/TradingViews/history?symbol=${nscId}-2&from=${now - 30 * 86400}&to=${now}&resolution=1D&symbolType=2`,
-  ]);
-
+  const checks = [
+    ["marketWatches", MARKET_WATCHES_URL],
+    ["instrumentCatalog", INSTRUMENTS_URL],
+    ["history", `${CHART_BASE}/TradingViews/history?symbol=${nscId}-2&from=${now - 30 * 86400}&to=${now}&resolution=1D&symbolType=2`],
+    ["chartdata", `${CHART_BASE}/instruments/${encodeURIComponent(nscId)}/chartdata?duration=1`],
+  ];
   for (const [name, url] of checks) {
     try {
       const res = await fetch(url, { headers: authHeaders(auth) });
       const text = await res.text();
-      result.checks[name] = {
-        status: res.status,
-        ok: res.ok,
-        contentType: res.headers.get("content-type") || "",
-        bodyPreview: text.slice(0, 1200),
-      };
+      result.checks[name] = { status: res.status, ok: res.ok, contentType: res.headers.get("content-type") || "", bodyPreview: text.slice(0, 1200) };
     } catch (err) {
       result.checks[name] = { networkError: err.message };
     }
   }
-
-  if (result.checks.instrumentCatalog?.ok) {
-    try {
-      const instrument = parseInstrumentCsv(await getInstrumentCatalog(env), nscId);
-      result.instrument = instrument ? {
-        symbol: instrument.Name || "",
-        marketTitle: instrument.MarketTitle || "",
-        categoryId: categoryIdFromMarketTitle(instrument.MarketTitle),
-      } : null;
-    } catch (err) {
-      result.instrumentError = err.message;
-    }
+  try {
+    const watches = await getUserMarketWatches(env);
+    result.marketWatches = watches.map((w) => ({ id: w?.id, title: w?.title, includeAssetInstruments: !!w?.includeAssetInstruments }));
+    const csv = await getMarketWatchInstrumentCatalog(env);
+    result.marketWatchCatalog = { ok: true, bytes: csv.length, hasNscId: csv.includes("NscId"), hasMarketTitle: csv.includes("MarketTitle") };
+    const instrument = parseInstrumentCsv(csv, nscId);
+    result.instrument = instrument ? { symbol: instrument.Name || "", marketTitle: instrument.MarketTitle || "", categoryId: categoryIdFromMarketTitle(instrument.MarketTitle) } : null;
+  } catch (err) {
+    result.marketWatchCatalog = { ok: false, error: err.message };
   }
-
   return result;
 }
