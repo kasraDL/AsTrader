@@ -17,11 +17,10 @@ export default {
         return json(await getState(env));
       }
       if (url.pathname === "/api/token" && request.method === "POST") {
-        const { token, userIdentifier, dido } = await request.json();
+        const { token, userIdentifier } = await request.json();
         if (!token) return json({ error: "token required" }, 400);
         await env.BOT_KV.put("agah:token", token);
         if (userIdentifier) await env.BOT_KV.put("agah:userIdentifier", userIdentifier);
-        if (dido) await env.BOT_KV.put("agah:dido", dido);
         await log(env, "توکن جدید ذخیره شد.");
         return json({ ok: true });
       }
