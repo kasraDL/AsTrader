@@ -1,4 +1,4 @@
-import { getDailyCandles, getLiveSegmentation, placeOrder } from "./agah.js";
+import { getAgahDiagnostics, getDailyCandles, getLiveSegmentation, placeOrder } from "./agah.js";
 import { smaCrossoverSignal } from "./signals.js";
 import { notify } from "./telegram.js";
 
@@ -24,6 +24,10 @@ export default {
         if (userIdentifier) await env.BOT_KV.put("agah:userIdentifier", userIdentifier);
         await log(env, "توکن جدید ذخیره شد.");
         return json({ ok: true });
+      }
+      if (url.pathname === "/api/diagnostics/agah" && request.method === "GET") {
+        const nscId = url.searchParams.get("nscId") || "IRO1IKCO0001";
+        return json(await getAgahDiagnostics(env, nscId));
       }
       if (url.pathname === "/api/symbols/search" && request.method === "GET") {
         return json(await searchSymbols(env, url.searchParams.get("q") || ""));
@@ -221,10 +225,12 @@ async function runSignalCheck(env) {
         price: lastClose,
         side: result.signal,
         reason: result.reason,
+        symbol: item.symbol || item.nscId,
+        name: item.name || "",
       };
       await env.BOT_KV.put(`pending:${signalId}`, JSON.stringify(pending), { expirationTtl: 3600 });
-      await log(env, `📊 سیگنال ${result.signal === "buy" ? "خرید" : "فروش"} برای ${item.nscId} ثبت شد.`);
-      await notify(env, `سیگنال جدید: ${item.nscId} (${result.signal}) - داشبورد رو چک کن.`);
+      await log(env, `📊 سیگنال ${result.signal === "buy" ? "خرید" : "فروش"} برای ${item.symbol || item.nscId} ثبت شد.`);
+      await notify(env, `سیگنال جدید: ${item.symbol || item.nscId} (${result.signal}) - داشبورد رو چک کن.`);
     } catch (err) {
       if (err.message === "TOKEN_EXPIRED" || err.message === "NO_TOKEN") {
         await log(env, "⚠️ توکن نامعتبر یا منقضی - از داشبورد توکن تازه ثبت کن.");
