@@ -1,0 +1,10 @@
+# Local credentials / browser captures
+.env
+.env.*
+*.har
+HAR/*.har
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
