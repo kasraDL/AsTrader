@@ -5,6 +5,7 @@
 // is currently stored in KV.
 
 const BASE = "https://tseonlineapi.agah.com/api/v1";
+const CHART_BASE = "https://tsembdpapi.agah.com/api/mbdp/v1";
 
 async function getAuth(env) {
   const token = await env.BOT_KV.get("agah:token");
@@ -18,9 +19,17 @@ function authHeaders({ token, userIdentifier }) {
     "Content-Type": "application/json",
     "Accept": "application/json, text/plain, */*",
     "Authorization": `Bearer ${token}`,
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+    "Origin": "https://online.agah.com",
+    "Referer": "https://online.agah.com/",
   };
   if (userIdentifier) h["UserIdentifier"] = userIdentifier;
   return h;
+}
+
+async function readError(res, label) {
+  const body = await res.text();
+  return new Error(`${label} failed: ${res.status} ${body.slice(0, 2000)}`);
 }
 
 // nscId e.g. "IRO1IKCO0001"
@@ -30,14 +39,9 @@ export async function getLiveSegmentation(env, nscId) {
     headers: authHeaders(auth),
   });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
-  if (!res.ok) {
-    const errorBody = await res.text();
-    throw new Error(`live-segmentation failed: ${res.status} ${errorBody.slice(0, 2000)}`);
-  }
+  if (!res.ok) throw await readError(res, "live-segmentation");
   return res.json();
 }
-
-const CHART_BASE = "https://tsembdpapi.agah.com/api/mbdp/v1";
 
 export async function getDailyCandles(env, nscId, { fromUnix, toUnix }) {
   const auth = await getAuth(env);
@@ -45,7 +49,7 @@ export async function getDailyCandles(env, nscId, { fromUnix, toUnix }) {
   const url = `${CHART_BASE}/TradingViews/history?symbol=${symbol}&from=${fromUnix}&to=${toUnix}&resolution=1D&symbolType=2`;
   const res = await fetch(url, { headers: authHeaders(auth) });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
-  if (!res.ok) throw new Error(`history failed: ${res.status}`);
+  if (!res.ok) throw await readError(res, "history");
   const json = await res.json();
   return json?.data?.candles ?? [];
 }
@@ -56,7 +60,7 @@ export async function getDelegatedBankAccounts(env) {
     headers: authHeaders(auth),
   });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
-  if (!res.ok) throw new Error(`delegatedBankAccounts failed: ${res.status}`);
+  if (!res.ok) throw await readError(res, "delegatedBankAccounts");
   return res.json();
 }
 
@@ -83,9 +87,49 @@ export async function placeOrder(env, { categoryId, bankAccountId = 0, nscId, or
     body: JSON.stringify(body),
   });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
+  if (!res.ok) throw await readError(res, "order");
   const data = await res.json();
-  if (!res.ok || data.isSuccess === false) {
+  if (data.isSuccess === false) {
     throw new Error(`order failed: ${JSON.stringify(data)}`);
   }
   return data;
+}
+
+// Authenticated connectivity diagnostics. Never returns the Bearer token itself.
+export async function getAgahDiagnostics(env, nscId = "IRO1IKCO0001") {
+  const auth = await getAuth(env);
+  const result = {
+    tokenPresent: true,
+    userIdentifierPresent: !!auth.userIdentifier,
+    nscId,
+    checks: {},
+  };
+
+  const checks = [
+    ["segmentation", `${BASE}/instruments/live-segmentation/${nscId}`],
+    ["bankAccounts", `${BASE}/financialAccounts/delegatedBankAccounts`],
+  ];
+
+  const now = Math.floor(Date.now() / 1000);
+  checks.push([
+    "history",
+    `${CHART_BASE}/TradingViews/history?symbol=${nscId}-2&from=${now - 30 * 86400}&to=${now}&resolution=1D&symbolType=2`,
+  ]);
+
+  for (const [name, url] of checks) {
+    try {
+      const res = await fetch(url, { headers: authHeaders(auth) });
+      const text = await res.text();
+      result.checks[name] = {
+        status: res.status,
+        ok: res.ok,
+        contentType: res.headers.get("content-type") || "",
+        bodyPreview: text.slice(0, 1200),
+      };
+    } catch (err) {
+      result.checks[name] = { networkError: err.message };
+    }
+  }
+
+  return result;
 }
