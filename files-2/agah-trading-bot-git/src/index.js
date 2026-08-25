@@ -117,13 +117,19 @@ async function handleLogin(env, body) {
   const token = normalizeToken(body?.token);
   const userIdentifier = normalizeUserIdentifier(body?.userIdentifier);
   if (!token) throw new Error("token required");
+
+  // Store the token and create the dashboard session without calling
+  // /usermarketwatches. That endpoint can return a 500 HTML error even when
+  // the supplied Bearer token is otherwise usable. Actual Agah API calls
+  // below still detect HTTP 401 and report TOKEN_EXPIRED when appropriate.
   await env.BOT_KV.put("agah:token", token);
   if (userIdentifier) await env.BOT_KV.put("agah:userIdentifier", userIdentifier);
-  const validation = await validateAgahAuth(env);
+  else await env.BOT_KV.delete("agah:userIdentifier");
+
   const session = `sess_${crypto.randomUUID()}`;
   await env.BOT_KV.put(SESSION_PREFIX + session, JSON.stringify({ ts: Date.now() }), { expirationTtl: 12 * 3600 });
-  await log(env, "ورود با توکن آگاه موفق بود.");
-  return { ok: true, session, ...validation };
+  await log(env, "توکن آگاه ذخیره شد و ورود به داشبورد انجام شد.");
+  return { ok: true, session, validated: false };
 }
 
 async function saveToken(env, body) {
@@ -133,14 +139,12 @@ async function saveToken(env, body) {
   await env.BOT_KV.put("agah:token", token);
   if (userIdentifier) await env.BOT_KV.put("agah:userIdentifier", userIdentifier);
   else await env.BOT_KV.delete("agah:userIdentifier");
-  try {
-    const validation = await validateAgahAuth(env);
-    await log(env, "توکن جدید ذخیره و اعتبارسنجی شد.");
-    return { ok: true, validated: true, ...validation };
-  } catch (err) {
-    await log(env, `⚠️ توکن ذخیره شد ولی اعتبارسنجی آگاه ناموفق بود: ${err.message}`);
-    return { ok: false, stored: true, validated: false, error: err.message };
-  }
+
+  // Do not make saving a token depend on /usermarketwatches. The token is
+  // stored immediately; downstream API calls will surface a real 401 if it
+  // has expired or is otherwise rejected by Agah.
+  await log(env, "توکن جدید ذخیره شد.");
+  return { ok: true, stored: true, validated: false };
 }
 
 async function log(env, text) {
@@ -219,204 +223,95 @@ async function getState(env) {
 async function addPendingId(env, id) {
   const ids = JSON.parse((await env.BOT_KV.get(PENDING_INDEX_KEY)) || "[]");
   if (!ids.includes(id)) ids.push(id);
-  await env.BOT_KV.put(PENDING_INDEX_KEY, JSON.stringify(ids.slice(-100)));
+  await env.BOT_KV.put(PENDING_INDEX_KEY, JSON.stringify(ids));
 }
 
 async function removePendingId(env, id) {
   const ids = JSON.parse((await env.BOT_KV.get(PENDING_INDEX_KEY)) || "[]");
-  await env.BOT_KV.put(PENDING_INDEX_KEY, JSON.stringify(ids.filter((item) => item !== id)));
+  await env.BOT_KV.put(PENDING_INDEX_KEY, JSON.stringify(ids.filter((x) => x !== id)));
 }
 
-async function searchSymbols(env, query) {
-  const q = query.trim();
-  if (q.length < 2) return { results: [] };
-  const raw = await searchInstruments(env, q, 8);
-  const results = [];
-  for (const item of raw) {
-    let categoryId = null;
-    let categoryError = null;
-    try {
-      const segmentation = await getLiveSegmentation(env, item.nscId);
-      categoryId = segmentation.categoryId;
-    } catch (err) {
-      categoryError = err.message;
-    }
-    results.push({ ...item, categoryId, categoryError });
-  }
-  return { results };
+async function searchSymbols(env, q) {
+  if (!q.trim()) return [];
+  return searchInstruments(env, q.trim(), 8);
 }
 
 async function handleWatchlist(env, body) {
-  const list = JSON.parse((await env.BOT_KV.get("watchlist")) || "[]");
-  if (body.action === "add") {
-    if (!body.nscId) throw new Error("nscId required");
-    let categoryId = body.categoryId;
-    if (!categoryId) {
-      const segmentation = await getLiveSegmentation(env, body.nscId);
-      categoryId = segmentation.categoryId;
-    }
-    const filtered = list.filter((w) => w.nscId !== body.nscId);
-    filtered.push({
-      nscId: body.nscId,
-      categoryId,
-      quantity: Number(body.quantity || 0),
-      symbol: body.symbol || body.nscId,
-      name: body.name || "",
-    });
-    await env.BOT_KV.put("watchlist", JSON.stringify(filtered));
-    await log(env, `${body.symbol || body.nscId} به واچ‌لیست اضافه شد.`);
-  } else if (body.action === "remove") {
-    await env.BOT_KV.put("watchlist", JSON.stringify(list.filter((w) => w.nscId !== body.nscId)));
-    await log(env, `${body.nscId} از واچ‌لیست حذف شد.`);
-  } else {
-    throw new Error("invalid action");
+  const current = JSON.parse((await env.BOT_KV.get("watchlist")) || "[]");
+  const action = body?.action;
+  const nscId = String(body?.nscId || "").trim();
+  if (action === "add" && nscId) {
+    const quote = await getInstrumentQuote(env, nscId);
+    if (!current.some((x) => x.nscId === nscId)) current.push(quote);
+  } else if (action === "remove" && nscId) {
+    const next = current.filter((x) => x.nscId !== nscId);
+    await env.BOT_KV.put("watchlist", JSON.stringify(next));
+    return next;
   }
-  return { ok: true };
+  await env.BOT_KV.put("watchlist", JSON.stringify(current));
+  return current;
 }
 
-async function placePendingOrder(env, pending) {
+async function runSignalCheck(env) {
   const settings = await getSettings(env);
-  const cap = Number(settings.maxOrderValueRial || env.MAX_ORDER_VALUE_RIAL || 0);
-  const orderValue = pending.price * pending.quantity;
-  if (cap && orderValue > cap) {
-    await log(env, `⛔️ سفارش ${pending.symbol || pending.nscId} به‌خاطر سقف ارزش لغو شد.`);
-    return { error: "exceeds MAX_ORDER_VALUE_RIAL" };
+  const watchlist = JSON.parse((await env.BOT_KV.get("watchlist")) || "[]");
+  if (!watchlist.length) return;
+  for (const item of watchlist) {
+    try {
+      const toUnix = Math.floor(Date.now() / 1000);
+      const candles = await getDailyCandles(env, item.nscId, { fromUnix: toUnix - 180 * DAY, toUnix });
+      if (candles.length < 30) continue;
+      const analysis = analyzeInstrument(candles);
+      if (!analysis?.signal || analysis.score < settings.minScore) continue;
+      const id = crypto.randomUUID();
+      const pending = { id, nscId: item.nscId, symbol: item.symbol, analysis, createdAt: Date.now() };
+      await env.BOT_KV.put(`pending:${id}`, JSON.stringify(pending), { expirationTtl: 24 * 3600 });
+      await addPendingId(env, id);
+      await log(env, `سیگنال ${analysis.signal} برای ${item.symbol} ایجاد شد.`);
+      await notify(env, pending);
+    } catch (err) {
+      await log(env, `⚠️ بررسی ${item.symbol || item.nscId} ناموفق بود: ${err.message}`);
+    }
   }
-  if (!pending.quantity) {
-    await log(env, `⛔️ سفارش ${pending.symbol || pending.nscId} تعداد نامعتبر دارد.`);
-    return { error: "invalid quantity" };
-  }
-  const result = await placeOrder(env, {
-    categoryId: pending.categoryId,
-    nscId: pending.nscId,
-    orderSide: pending.side === "buy" ? 1 : 2,
-    price: pending.price,
-    quantity: pending.quantity,
-  });
-  await bumpDailyOrders(env);
-  await log(env, `✅ سفارش ${pending.symbol || pending.nscId} (${pending.side}) ثبت شد (decisionId: ${result?.data?.decisionId ?? "?"}).`);
-  return { ok: true, result };
 }
 
 async function handleSignalAction(env, id, action) {
   const raw = await env.BOT_KV.get(`pending:${id}`);
-  if (!raw) return { error: "signal not found or expired" };
+  if (!raw) return { error: "signal not found" };
   const pending = JSON.parse(raw);
-  await env.BOT_KV.delete(`pending:${id}`);
-  await removePendingId(env, id);
   if (action === "reject") {
-    await log(env, `❌ سیگنال ${pending.symbol || pending.nscId} (${pending.side}) رد شد.`);
-    return { ok: true };
+    await env.BOT_KV.delete(`pending:${id}`);
+    await removePendingId(env, id);
+    await log(env, `سیگنال ${pending.symbol || pending.nscId} رد شد.`);
+    return { ok: true, action: "rejected" };
   }
-  try {
-    return await placePendingOrder(env, pending);
-  } catch (err) {
-    await log(env, `⚠️ خطا در ارسال سفارش ${pending.nscId}: ${err.message}`);
-    return { error: err.message };
-  }
-}
-
-async function alreadyPending(env, nscId, side) {
-  const ids = JSON.parse((await env.BOT_KV.get(PENDING_INDEX_KEY)) || "[]");
-  for (const id of ids) {
-    const raw = await env.BOT_KV.get(`pending:${id}`);
-    if (!raw) continue;
-    const item = JSON.parse(raw);
-    if (item.nscId === nscId && item.side === side) return true;
-  }
-  return false;
-}
-
-async function runSignalCheck(env) {
-  const list = JSON.parse((await env.BOT_KV.get("watchlist")) || "[]");
-  if (!list.length) {
-    await log(env, "واچ‌لیست خالی است؛ ابتدا نمادهایی برای رصد انتخاب کنید.");
-    return;
-  }
-
+  if (action !== "confirm") return { error: "invalid action" };
   const settings = await getSettings(env);
   const daily = await getDaily(env);
-  const toUnix = Math.floor(Date.now() / 1000);
-  const fromUnix = toUnix - 220 * DAY;
-  let holdings = [];
-  let buyingPower = 0;
-  try {
-    const held = await getHoldingsMap(env);
-    holdings = held.holdings || [];
-    const cash = held.snapshot?.remaining;
-    buyingPower = Number(cash?.buyingPower ?? cash?.remain ?? cash?.remaining ?? cash?.power ?? 0) || 0;
-  } catch (err) {
-    if (err.message === "TOKEN_EXPIRED" || err.message === "NO_TOKEN") {
-      await log(env, "⚠️ توکن نامعتبر یا منقضی است. دوباره وارد شوید.");
-      return;
-    }
+  if (!canAutoTrade(settings) && !settings.allowManualConfirm) {
+    await log(env, `تایید دستی ${pending.symbol || pending.nscId} مجاز نیست.`);
+    return { error: "manual confirmation disabled" };
   }
+  if (daily.orders >= settings.maxDailyOrders) return { error: "daily order limit reached" };
+  const quantity = await sizeQuantity(env, pending.nscId, settings, pending.analysis);
+  if (!quantity) return { error: "quantity could not be determined" };
+  const result = await placeOrder(env, {
+    nscId: pending.nscId,
+    side: pending.analysis.signal === "BUY" ? "buy" : "sell",
+    quantity,
+    price: pending.analysis.price,
+  });
+  await bumpDailyOrders(env);
+  await env.BOT_KV.delete(`pending:${id}`);
+  await removePendingId(env, id);
+  await log(env, `سفارش ${pending.analysis.signal} برای ${pending.symbol || pending.nscId} ارسال شد.`);
+  return { ok: true, result };
+}
 
-  for (const item of list) {
-    try {
-      const candles = await getDailyCandles(env, item.nscId, { fromUnix, toUnix });
-      if (!candles.length) continue;
-      const analysis = analyzeInstrument(candles);
-      if (analysis.signal === "hold" || (analysis.score || 0) < settings.minScore) continue;
-
-      const lastSignalKey = `lastSignal:${item.nscId}`;
-      const last = JSON.parse((await env.BOT_KV.get(lastSignalKey)) || "{}");
-      const today = tehranDateKey();
-      if (last.date === today && last.side === analysis.signal) continue;
-      if (await alreadyPending(env, item.nscId, analysis.signal)) continue;
-
-      if (analysis.signal === "sell" && settings.sellOnlyHoldings) {
-        const heldQty = holdings.find((h) => h.nscId === item.nscId)?.quantity || 0;
-        if (heldQty <= 0) continue;
-      }
-
-      const qty = analysis.signal === "sell"
-        ? Math.max(1, Math.floor(holdings.find((h) => h.nscId === item.nscId)?.quantity || item.quantity || 0))
-        : sizeQuantity({
-            price: analysis.last,
-            buyingPower,
-            settings,
-            fallbackQuantity: item.quantity,
-          });
-      if (!qty) continue;
-
-      const pending = {
-        nscId: item.nscId,
-        categoryId: item.categoryId,
-        quantity: qty,
-        price: analysis.last,
-        side: analysis.signal,
-        reason: analysis.reason,
-        score: analysis.score,
-        symbol: item.symbol || item.nscId,
-        name: item.name || "",
-      };
-
-      const gate = canAutoTrade(settings, daily);
-      if (gate.ok) {
-        try {
-          await placePendingOrder(env, pending);
-          daily.orders = (daily.orders || 0) + 1;
-          await env.BOT_KV.put(lastSignalKey, JSON.stringify({ date: today, side: analysis.signal }));
-          await notify(env, `سفارش خودکار ${pending.symbol}: ${pending.side} ${pending.quantity} @ ${pending.price}`);
-          continue;
-        } catch (err) {
-          await log(env, `⚠️ ارسال خودکار ${pending.symbol} ناموفق بود؛ سیگنال برای تایید دستی ثبت شد. ${err.message}`);
-        }
-      }
-
-      const signalId = crypto.randomUUID();
-      await env.BOT_KV.put(`pending:${signalId}`, JSON.stringify(pending), { expirationTtl: 3600 });
-      await addPendingId(env, signalId);
-      await env.BOT_KV.put(lastSignalKey, JSON.stringify({ date: today, side: analysis.signal }));
-      await log(env, `📊 سیگنال ${analysis.signal === "buy" ? "خرید" : "فروش"} برای ${pending.symbol} ثبت شد.`);
-      await notify(env, `سیگنال جدید: ${pending.symbol} (${analysis.signal})`);
-    } catch (err) {
-      if (err.message === "TOKEN_EXPIRED" || err.message === "NO_TOKEN") {
-        await log(env, "⚠️ توکن نامعتبر یا منقضی است. دوباره وارد شوید.");
-        return;
-      }
-      await log(env, `⚠️ خطا در بررسی ${item.symbol || item.nscId}: ${err.message}`);
-    }
+async function getHoldingsForAutoTrade(env) {
+  try {
+    return await getHoldingsMap(env);
+  } catch {
+    return new Map();
   }
 }
