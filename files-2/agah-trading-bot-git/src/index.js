@@ -1,4 +1,4 @@
-import { getAgahDiagnostics, getDailyCandles, getLiveSegmentation, placeOrder, searchInstruments } from "./agah.js";
+import { getAgahDiagnostics, getDailyCandles, getInstrumentQuote, getLiveSegmentation, placeOrder, searchInstruments, searchInstrumentsPublic } from "./agah.js";
 import { smaCrossoverSignal } from "./signals.js";
 import { notify } from "./telegram.js";
 
@@ -9,6 +9,26 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (!url.pathname.startsWith("/api/")) return new Response("not found", { status: 404 });
+
+    // Public, unauthenticated, read-only endpoints for external sites (symbols + quotes).
+    // These use the account's own stored token server-side, but need no dashboard key.
+    if (url.pathname.startsWith("/api/public/")) {
+      if (request.method === "OPTIONS") return corsJson(null, 204);
+      try {
+        if (url.pathname === "/api/public/symbols" && request.method === "GET") {
+          return corsJson(await publicSearchSymbols(env, url.searchParams.get("q") || ""));
+        }
+        if (url.pathname === "/api/public/quote" && request.method === "GET") {
+          const nscId = url.searchParams.get("nscId");
+          if (!nscId) return corsJson({ error: "nscId required" }, 400);
+          return corsJson(await getInstrumentQuote(env, nscId));
+        }
+        return corsJson({ error: "not found" }, 404);
+      } catch (err) {
+        const status = err.message === "TOKEN_EXPIRED" || err.message === "NO_TOKEN" ? 503 : 500;
+        return corsJson({ error: err.message }, status);
+      }
+    }
 
     if (!checkAuth(request, env)) return json({ error: "unauthorized" }, 401);
 
@@ -56,6 +76,24 @@ export default {
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
+}
+
+// Same as json(), but with CORS headers so any site (your own included) can call it directly.
+function corsJson(data, status = 200) {
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Cache-Control": "public, max-age=15", // light caching so a busy site doesn't hammer Agah on every load
+  };
+  if (data === null) return new Response(null, { status, headers });
+  return new Response(JSON.stringify(data), { status, headers: { ...headers, "Content-Type": "application/json" } });
+}
+
+async function publicSearchSymbols(env, query) {
+  const q = query.trim();
+  if (q.length < 2) return { results: [] };
+  return { results: await searchInstrumentsPublic(env, q, 8) };
 }
 
 function checkAuth(request, env) {

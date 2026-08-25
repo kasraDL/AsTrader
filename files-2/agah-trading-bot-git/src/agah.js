@@ -149,6 +149,48 @@ export async function searchInstruments(env, query, limit = 8) {
   }));
 }
 
+// Candidate column names for "last traded / live price" seen across different
+// Agah CSV exports. We don't know for certain which one the account's market
+// watch CSV uses, so we return ALL raw columns too and just pick the first
+// match here as a convenience "price" field.
+const PRICE_FIELD_CANDIDATES = [
+  "LastTradedPrice", "LastPrice", "ClosePrice", "Close", "PDrCotVal",
+  "PClosing", "LastTrade", "Price",
+];
+const CHANGE_FIELD_CANDIDATES = ["PriceChange", "PriceChangePercent", "PClosingPercent", "PriceVar"];
+
+function pickField(row, candidates) {
+  for (const key of candidates) {
+    if (row[key] !== undefined && row[key] !== "") return row[key];
+  }
+  return null;
+}
+
+function toPublicQuote(instrument) {
+  return {
+    symbol: instrument.Name || "",
+    name: instrument.CompanyName || "",
+    nscId: instrument.NscId || "",
+    marketTitle: instrument.MarketTitle || "",
+    price: pickField(instrument, PRICE_FIELD_CANDIDATES),
+    change: pickField(instrument, CHANGE_FIELD_CANDIDATES),
+    raw: instrument, // all CSV columns as-is, in case the field you need isn't in the guesses above
+  };
+}
+
+// Public (no dashboard auth) symbol search - still uses the account's own
+// token server-side, but doesn't require the dashboard password to call.
+export async function searchInstrumentsPublic(env, query, limit = 8) {
+  const matches = parseInstrumentCsvMatches(await getInstrumentCatalog(env), query, limit);
+  return matches.map(toPublicQuote);
+}
+
+// Public (no dashboard auth) single-symbol quote snapshot.
+export async function getInstrumentQuote(env, nscId) {
+  const instrument = await getInstrumentFromCatalog(env, nscId);
+  return toPublicQuote(instrument);
+}
+
 function categoryIdFromMarketTitle(marketTitle) {
   const market = String(marketTitle || "").trim();
   if (market === "بورس") return "272de7e4-5c65-463a-92c2-535e2caa30fe";
