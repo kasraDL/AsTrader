@@ -28,15 +28,6 @@ export default {
       if (url.pathname === "/api/symbols/search" && request.method === "GET") {
         return json(await searchSymbols(env, url.searchParams.get("q") || ""));
       }
-      if (url.pathname === "/api/test/agah-category" && request.method === "GET") {
-        const nscId = "IRO1IKCO0001";
-        const segmentation = await getLiveSegmentation(env, nscId);
-        return json({
-          ok: true,
-          nscId,
-          categoryId: findCategoryId(segmentation),
-        });
-      }
       if (url.pathname === "/api/watchlist" && request.method === "POST") {
         return json(await handleWatchlist(env, await request.json()));
       }
@@ -103,17 +94,17 @@ async function searchSymbols(env, query) {
   const data = await res.json();
   const raw = Array.isArray(data?.instrumentSearch) ? data.instrumentSearch : [];
 
-  // Resolve Agah's categoryId server-side. The dashboard never receives the Agah token.
   const results = [];
   for (const item of raw.slice(0, 8)) {
     const nscId = item.cIsin || item.isin || item.nscId || "";
     let categoryId = null;
+    let categoryError = null;
     if (nscId) {
       try {
         const segmentation = await getLiveSegmentation(env, nscId);
         categoryId = findCategoryId(segmentation);
-      } catch (_) {
-        // Search remains usable even if Agah's segmentation endpoint temporarily fails.
+      } catch (err) {
+        categoryError = err.message;
       }
     }
     results.push({
@@ -121,6 +112,7 @@ async function searchSymbols(env, query) {
       name: item.lVal30 || "",
       nscId,
       categoryId,
+      categoryError,
       flow: item.flow ?? null,
       flowTitle: item.flowTitle || "",
       insCode: item.insCode || "",
