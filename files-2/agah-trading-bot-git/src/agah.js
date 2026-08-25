@@ -8,14 +8,30 @@ const WEB_ORIGIN = "https://online.agah.com";
 const INSTRUMENTS_URL = `${BASE}/instruments/InstrumentsWithNote`;
 const MARKET_WATCHES_URL = `${BASE}/usermarketwatches`;
 
+function normalizeToken(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^Bearer\s+/i, "")
+    .replace(/^['"]|['"]$/g, "")
+    .trim();
+}
+
+function normalizeUserIdentifier(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .trim();
+}
+
 async function getAuth(env) {
   const [token, userIdentifier] = await Promise.all([
     env.BOT_KV.get("agah:token"),
     env.BOT_KV.get("agah:userIdentifier"),
   ]);
-  const resolvedUserIdentifier = env.AGAH_USER_IDENTIFIER || userIdentifier;
-  if (!token) throw new Error("NO_TOKEN");
-  return { token, userIdentifier: resolvedUserIdentifier };
+  const resolvedToken = normalizeToken(token);
+  const resolvedUserIdentifier = normalizeUserIdentifier(env.AGAH_USER_IDENTIFIER || userIdentifier);
+  if (!resolvedToken) throw new Error("NO_TOKEN");
+  return { token: resolvedToken, userIdentifier: resolvedUserIdentifier };
 }
 
 function authHeaders({ token, userIdentifier }) {
@@ -99,6 +115,11 @@ async function getUserMarketWatches(env) {
   return Array.isArray(payload?.data) ? payload.data : [];
 }
 
+export async function validateAgahAuth(env) {
+  const watches = await getUserMarketWatches(env);
+  return { ok: true, marketWatchCount: watches.length };
+}
+
 async function getMarketWatchInstrumentCatalog(env) {
   const watches = await getUserMarketWatches(env);
   const watch = watches.find((w) => w?.includeAssetInstruments === true && Number(w?.id) > 0) || watches.find((w) => Number(w?.id) > 0);
@@ -149,10 +170,6 @@ export async function searchInstruments(env, query, limit = 8) {
   }));
 }
 
-// Candidate column names for "last traded / live price" seen across different
-// Agah CSV exports. We don't know for certain which one the account's market
-// watch CSV uses, so we return ALL raw columns too and just pick the first
-// match here as a convenience "price" field.
 const PRICE_FIELD_CANDIDATES = [
   "LastTradedPrice", "LastPrice", "ClosePrice", "Close", "PDrCotVal",
   "PClosing", "LastTrade", "Price",
@@ -174,18 +191,15 @@ function toPublicQuote(instrument) {
     marketTitle: instrument.MarketTitle || "",
     price: pickField(instrument, PRICE_FIELD_CANDIDATES),
     change: pickField(instrument, CHANGE_FIELD_CANDIDATES),
-    raw: instrument, // all CSV columns as-is, in case the field you need isn't in the guesses above
+    raw: instrument,
   };
 }
 
-// Public (no dashboard auth) symbol search - still uses the account's own
-// token server-side, but doesn't require the dashboard password to call.
 export async function searchInstrumentsPublic(env, query, limit = 8) {
   const matches = parseInstrumentCsvMatches(await getInstrumentCatalog(env), query, limit);
   return matches.map(toPublicQuote);
 }
 
-// Public (no dashboard auth) single-symbol quote snapshot.
 export async function getInstrumentQuote(env, nscId) {
   const instrument = await getInstrumentFromCatalog(env, nscId);
   return toPublicQuote(instrument);
@@ -208,7 +222,7 @@ export async function getLiveSegmentation(env, nscId) {
 export async function getDailyCandles(env, nscId, { fromUnix, toUnix }) {
   const auth = await getAuth(env);
   const symbol = `${nscId}-2`;
-  const url = `${CHART_BASE}/TradingViews/history?symbol=${symbol}&from=${fromUnix}&to=${toUnix}&resolution=1D&symbolType=2`;
+  const url = `${CHART_BASE}/TradingViews/history?symbol=${encodeURIComponent(symbol)}&from=${fromUnix}&to=${toUnix}&resolution=1D&symbolType=2`;
   const res = await fetch(url, { headers: authHeaders(auth) });
   if (res.status === 401) throw new Error("TOKEN_EXPIRED");
   if (!res.ok) throw await readError(res, "history");
