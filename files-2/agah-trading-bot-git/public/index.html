@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>میز معاملاتی آگاه</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0c0f;
+    --surface:#12151a;
+    --surface-2:#171b21;
+    --line:#22262d;
+    --text:#e8eaed;
+    --muted:#868c96;
+    --buy:#3fbf7f;
+    --sell:#e5484d;
+    --pending:#e0a63e;
+    --mono:'JetBrains Mono', ui-monospace, monospace;
+    --sans:'Vazirmatn', system-ui, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--sans); min-height:100vh;
+  }
+  #gate{
+    position:fixed; inset:0; background:var(--bg); z-index:50;
+    display:flex; align-items:center; justify-content:center; flex-direction:column; gap:16px;
+  }
+  #gate.hidden{display:none;}
+  #gate h1{font-size:20px; font-weight:600; margin:0;}
+  #gate input{
+    background:var(--surface); border:1px solid var(--line); color:var(--text);
+    padding:12px 14px; border-radius:6px; font-family:var(--mono); font-size:15px;
+    width:260px; text-align:center;
+  }
+  #gate button{
+    background:var(--buy); color:#04140c; border:none; border-radius:6px;
+    padding:10px 20px; font-family:var(--sans); font-weight:600; cursor:pointer; font-size:14px;
+  }
+  #gate .err{color:var(--sell); font-size:13px; min-height:16px;}
+
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:16px 24px; border-bottom:1px solid var(--line);
+  }
+  header h1{font-size:16px; font-weight:800; margin:0; letter-spacing:.3px;}
+  .dot{width:8px; height:8px; border-radius:50%; display:inline-block; margin-left:8px;}
+  .dot.ok{background:var(--buy); box-shadow:0 0 8px var(--buy);}
+  .dot.bad{background:var(--sell); box-shadow:0 0 8px var(--sell);}
+  header button{
+    background:transparent; border:1px solid var(--line); color:var(--muted);
+    padding:6px 14px; border-radius:6px; font-family:var(--sans); cursor:pointer; font-size:13px;
+  }
+
+  main{
+    display:grid; grid-template-columns:280px 1fr 300px; gap:0; min-height:calc(100vh - 57px);
+  }
+  @media (max-width:900px){ main{grid-template-columns:1fr;} }
+
+  section{padding:20px; border-left:1px solid var(--line);}
+  section:last-child{border-left:none;}
+  section h2{font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 14px;}
+
+  .watch-item{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:10px 0; border-bottom:1px solid var(--line); font-size:13px;
+  }
+  .watch-item .nsc{font-family:var(--mono); font-weight:700;}
+  .watch-item .qty{color:var(--muted); font-family:var(--mono); font-size:12px;}
+  .watch-item .rm{background:none; border:none; color:var(--sell); cursor:pointer; font-size:16px;}
+
+  .add-form{margin-top:16px; display:flex; flex-direction:column; gap:8px;}
+  .add-form input{
+    background:var(--surface); border:1px solid var(--line); color:var(--text);
+    padding:8px 10px; border-radius:5px; font-family:var(--mono); font-size:12px;
+  }
+  .add-form button{
+    background:var(--surface-2); border:1px solid var(--line); color:var(--text);
+    padding:8px; border-radius:5px; cursor:pointer; font-family:var(--sans); font-size:13px;
+  }
+
+  .token-box{margin-bottom:22px; padding-bottom:18px; border-bottom:1px solid var(--line);}
+  .token-status{font-size:12px; color:var(--muted); margin-bottom:8px;}
+  .token-status.set{color:var(--buy);}
+
+  /* signature element: the order-ticket card */
+  .ticket{
+    position:relative; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; padding:16px 18px; margin-bottom:14px; overflow:hidden;
+  }
+  .ticket::before{
+    content:''; position:absolute; right:0; top:0; bottom:0; width:4px;
+  }
+  .ticket.buy::before{background:var(--buy);}
+  .ticket.sell::before{background:var(--sell);}
+  .ticket .side{
+    font-family:var(--mono); font-weight:700; font-size:12px; letter-spacing:.05em;
+  }
+  .ticket.buy .side{color:var(--buy);}
+  .ticket.sell .side{color:var(--sell);}
+  .ticket .nsc{font-size:18px; font-weight:800; margin:4px 0 10px;}
+  .ticket .row{display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-bottom:4px;}
+  .ticket .row b{color:var(--text); font-family:var(--mono); font-weight:500;}
+  .ticket .reason{font-size:11px; color:var(--muted); margin:8px 0 12px; font-style:normal;}
+  .ticket .actions{display:flex; gap:8px;}
+  .ticket .actions button{
+    flex:1; padding:9px; border-radius:5px; border:none; cursor:pointer;
+    font-family:var(--sans); font-weight:600; font-size:13px;
+  }
+  .ticket .confirm{background:var(--buy); color:#04140c;}
+  .ticket .reject{background:transparent; border:1px solid var(--line) !important; color:var(--muted);}
+  .empty{color:var(--muted); font-size:13px; padding:20px 0; text-align:center;}
+
+  .log-item{font-size:12px; padding:8px 0; border-bottom:1px solid var(--line); color:var(--muted);}
+  .log-item time{display:block; font-family:var(--mono); font-size:10px; color:#4a4f57; margin-bottom:2px;}
+
+  .check-btn{
+    width:100%; margin-top:12px; padding:9px; background:var(--surface-2); border:1px solid var(--line);
+    color:var(--text); border-radius:5px; cursor:pointer; font-family:var(--sans); font-size:13px;
+  }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <h1>میز معاملاتی آگاه</h1>
+  <input id="pw" type="password" placeholder="رمز داشبورد" />
+  <button onclick="login()">ورود</button>
+  <div class="err" id="gateErr"></div>
+</div>
+
+<div id="app" style="display:none;">
+  <header>
+    <h1><span class="dot ok" id="tokenDot"></span>میز معاملاتی آگاه</h1>
+    <button onclick="logout()">خروج</button>
+  </header>
+  <main>
+    <section>
+      <div class="token-box">
+        <h2>توکن آگاه</h2>
+        <div class="token-status" id="tokenStatus">در حال بررسی...</div>
+        <div class="add-form">
+          <input id="tokenInput" placeholder="Bearer token" />
+          <input id="uidInput" placeholder="UserIdentifier (اختیاری)" />
+          <button onclick="setToken()">ذخیره توکن</button>
+        </div>
+      </div>
+
+      <h2>واچ‌لیست</h2>
+      <div id="watchlist"></div>
+      <div class="add-form">
+        <input id="nscInput" placeholder="کد نماد مثل IRO1IKCO0001" />
+        <input id="catInput" placeholder="Category ID" />
+        <input id="qtyInput" placeholder="تعداد" type="number" />
+        <button onclick="addWatch()">افزودن نماد</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>سیگنال‌های در انتظار تایید</h2>
+      <div id="signals"></div>
+      <button class="check-btn" onclick="runCheck()">بررسی فوری سیگنال‌ها</button>
+    </section>
+
+    <section>
+      <h2>گزارش فعالیت</h2>
+      <div id="log"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+let KEY = localStorage.getItem('dashKey') || '';
+
+async function api(path, opts={}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'Content-Type':'application/json', 'X-Dashboard-Key': KEY, ...(opts.headers||{}) },
+  });
+  if (res.status === 401) { logout(); throw new Error('unauthorized'); }
+  return res.json();
+}
+
+async function login() {
+  KEY = document.getElementById('pw').value;
+  try {
+    await api('/api/state');
+    localStorage.setItem('dashKey', KEY);
+    document.getElementById('gate').classList.add('hidden');
+    document.getElementById('app').style.display = 'block';
+    refresh();
+  } catch {
+    document.getElementById('gateErr').textContent = 'رمز اشتباهه.';
+  }
+}
+function logout(){ localStorage.removeItem('dashKey'); location.reload(); }
+
+function fmt(n){ return Number(n).toLocaleString('fa-IR'); }
+
+async function refresh(){
+  const state = await api('/api/state');
+
+  const tokenStatus = document.getElementById('tokenStatus');
+  const tokenDot = document.getElementById('tokenDot');
+  if (state.hasToken){
+    tokenStatus.textContent = 'توکن فعاله';
+    tokenStatus.classList.add('set');
+    tokenDot.className = 'dot ok';
+  } else {
+    tokenStatus.textContent = 'توکنی ثبت نشده';
+    tokenStatus.classList.remove('set');
+    tokenDot.className = 'dot bad';
+  }
+
+  const wl = document.getElementById('watchlist');
+  wl.innerHTML = state.watchlist.length ? state.watchlist.map(w => `
+    <div class="watch-item">
+      <div><div class="nsc">${w.nscId}</div><div class="qty">qty:${fmt(w.quantity)}</div></div>
+      <button class="rm" onclick="removeWatch('${w.nscId}')">✕</button>
+    </div>`).join('') : '<div class="empty">واچ‌لیست خالیه</div>';
+
+  const sig = document.getElementById('signals');
+  sig.innerHTML = state.pending.length ? state.pending.map(p => `
+    <div class="ticket ${p.side}">
+      <div class="side">${p.side === 'buy' ? 'سیگنال خرید' : 'سیگنال فروش'}</div>
+      <div class="nsc">${p.nscId}</div>
+      <div class="row"><span>قیمت پیشنهادی</span><b>${fmt(p.price)}</b></div>
+      <div class="row"><span>تعداد</span><b>${fmt(p.quantity)}</b></div>
+      <div class="row"><span>ارزش تقریبی</span><b>${fmt(p.price * p.quantity)} ریال</b></div>
+      <div class="reason">${p.reason || ''}</div>
+      <div class="actions">
+        <button class="confirm" onclick="act('${p.id}','confirm')">تایید و ارسال</button>
+        <button class="reject" onclick="act('${p.id}','reject')">رد</button>
+      </div>
+    </div>`).join('') : '<div class="empty">سیگنال در انتظاری نیست</div>';
+
+  const log = document.getElementById('log');
+  log.innerHTML = state.log.length ? state.log.slice().reverse().map(l => `
+    <div class="log-item"><time>${new Date(l.ts).toLocaleString('fa-IR')}</time>${l.text}</div>`).join('')
+    : '<div class="empty">فعالیتی ثبت نشده</div>';
+}
+
+async function setToken(){
+  const token = document.getElementById('tokenInput').value.trim();
+  const userIdentifier = document.getElementById('uidInput').value.trim();
+  if (!token) return;
+  await api('/api/token', { method:'POST', body: JSON.stringify({ token, userIdentifier }) });
+  document.getElementById('tokenInput').value = '';
+  refresh();
+}
+
+async function addWatch(){
+  const nscId = document.getElementById('nscInput').value.trim();
+  const categoryId = document.getElementById('catInput').value.trim();
+  const quantity = Number(document.getElementById('qtyInput').value);
+  if (!nscId || !categoryId || !quantity) return;
+  await api('/api/watchlist', { method:'POST', body: JSON.stringify({ action:'add', nscId, categoryId, quantity }) });
+  document.getElementById('nscInput').value = '';
+  document.getElementById('catInput').value = '';
+  document.getElementById('qtyInput').value = '';
+  refresh();
+}
+
+async function removeWatch(nscId){
+  await api('/api/watchlist', { method:'POST', body: JSON.stringify({ action:'remove', nscId }) });
+  refresh();
+}
+
+async function act(id, action){
+  await api(`/api/signals/${id}/${action}`, { method:'POST' });
+  refresh();
+}
+
+async function runCheck(){
+  await api('/api/check', { method:'POST' });
+  refresh();
+}
+
+if (KEY) {
+  api('/api/state').then(() => {
+    document.getElementById('gate').classList.add('hidden');
+    document.getElementById('app').style.display = 'block';
+    refresh();
+  }).catch(() => {});
+}
+setInterval(() => { if (document.getElementById('app').style.display === 'block') refresh(); }, 15000);
+</script>
+</body>
+</html>
