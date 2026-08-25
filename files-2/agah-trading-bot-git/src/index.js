@@ -1,16 +1,16 @@
-import { getDailyCandles, placeOrder } from "./agah.js";
+import { getDailyCandles, getLiveSegmentation, placeOrder } from "./agah.js";
 import { smaCrossoverSignal } from "./signals.js";
 import { notify } from "./telegram.js";
 
 const DAY = 86400;
 const MAX_LOG = 50;
+const TSETMC_SEARCH = "https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/";
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (!url.pathname.startsWith("/api/")) return new Response("not found", { status: 404 });
 
-    // /api/state (GET) doubles as the login check - any wrong key gets 401 here too.
     if (!checkAuth(request, env)) return json({ error: "unauthorized" }, 401);
 
     try {
@@ -24,6 +24,9 @@ export default {
         if (userIdentifier) await env.BOT_KV.put("agah:userIdentifier", userIdentifier);
         await log(env, "توکن جدید ذخیره شد.");
         return json({ ok: true });
+      }
+      if (url.pathname === "/api/symbols/search" && request.method === "GET") {
+        return json(await searchSymbols(env, url.searchParams.get("q") || ""));
       }
       if (url.pathname === "/api/watchlist" && request.method === "POST") {
         return json(await handleWatchlist(env, await request.json()));
@@ -80,14 +83,76 @@ async function getState(env) {
   return { hasToken: !!token, watchlist, pending, log: JSON.parse(logRaw || "[]") };
 }
 
+async function searchSymbols(env, query) {
+  const q = query.trim();
+  if (q.length < 2) return { results: [] };
+
+  const res = await fetch(`${TSETMC_SEARCH}${encodeURIComponent(q)}`, {
+    headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0 AsTrader/1.0" },
+  });
+  if (!res.ok) throw new Error(`symbol search failed: ${res.status}`);
+  const data = await res.json();
+  const raw = Array.isArray(data?.instrumentSearch) ? data.instrumentSearch : [];
+
+  // Resolve Agah's categoryId server-side. The dashboard never receives the Agah token.
+  const results = [];
+  for (const item of raw.slice(0, 8)) {
+    const nscId = item.cIsin || item.isin || item.nscId || "";
+    let categoryId = null;
+    if (nscId) {
+      try {
+        const segmentation = await getLiveSegmentation(env, nscId);
+        categoryId = findCategoryId(segmentation);
+      } catch (_) {
+        // Search remains usable even if Agah's segmentation endpoint temporarily fails.
+      }
+    }
+    results.push({
+      symbol: item.lVal18AFC || "",
+      name: item.lVal30 || "",
+      nscId,
+      categoryId,
+      flow: item.flow ?? null,
+      flowTitle: item.flowTitle || "",
+      insCode: item.insCode || "",
+    });
+  }
+  return { results };
+}
+
+function findCategoryId(value) {
+  if (!value || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findCategoryId(item);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  for (const [key, val] of Object.entries(value)) {
+    if (/^categoryid$/i.test(key) && (typeof val === "string" || typeof val === "number")) return String(val);
+  }
+  for (const val of Object.values(value)) {
+    const found = findCategoryId(val);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 async function handleWatchlist(env, body) {
   const list = JSON.parse((await env.BOT_KV.get("watchlist")) || "[]");
   if (body.action === "add") {
     if (!body.nscId || !body.categoryId || !body.quantity) throw new Error("nscId, categoryId, quantity required");
     const filtered = list.filter((w) => w.nscId !== body.nscId);
-    filtered.push({ nscId: body.nscId, categoryId: body.categoryId, quantity: Number(body.quantity) });
+    filtered.push({
+      nscId: body.nscId,
+      categoryId: body.categoryId,
+      quantity: Number(body.quantity),
+      symbol: body.symbol || body.nscId,
+      name: body.name || "",
+    });
     await env.BOT_KV.put("watchlist", JSON.stringify(filtered));
-    await log(env, `${body.nscId} به واچ‌لیست اضافه شد.`);
+    await log(env, `${body.symbol || body.nscId} به واچ‌لیست اضافه شد.`);
   } else if (body.action === "remove") {
     await env.BOT_KV.put("watchlist", JSON.stringify(list.filter((w) => w.nscId !== body.nscId)));
     await log(env, `${body.nscId} از واچ‌لیست حذف شد.`);
