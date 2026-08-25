@@ -9,41 +9,16 @@ const INSTRUMENTS_URL = `${BASE}/instruments/InstrumentsWithNote`;
 const MARKET_WATCHES_URL = `${BASE}/usermarketwatches`;
 
 async function getAuth(env) {
-  const [token, userIdentifier, storedDido] = await Promise.all([
+  const [token, userIdentifier] = await Promise.all([
     env.BOT_KV.get("agah:token"),
     env.BOT_KV.get("agah:userIdentifier"),
-    env.BOT_KV.get("agah:dido"),
   ]);
   const resolvedUserIdentifier = env.AGAH_USER_IDENTIFIER || userIdentifier;
   if (!token) throw new Error("NO_TOKEN");
-
-  let dido = env.AGAH_DIDO || storedDido || "";
-  if (!dido) {
-    dido = await bootstrapDido(env);
-  }
-  return { token, userIdentifier: resolvedUserIdentifier, dido };
+  return { token, userIdentifier: resolvedUserIdentifier };
 }
 
-async function bootstrapDido(env) {
-  try {
-    const res = await fetch(`${WEB_ORIGIN}/auth/marketWatch`, {
-      headers: {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:154.0) Gecko/20100101 Firefox/154.0",
-      },
-    });
-    const setCookie = res.headers.get("set-cookie") || "";
-    const match = setCookie.match(/(?:^|[,;\\s])DIDO=([^;]+)/i);
-    const dido = match?.[1] || "";
-    if (dido) await env.BOT_KV.put("agah:dido", dido);
-    return dido;
-  } catch {
-    return "";
-  }
-}
-
-function authHeaders({ token, userIdentifier, dido }) {
+function authHeaders({ token, userIdentifier }) {
   const h = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/plain, */*",
@@ -57,7 +32,6 @@ function authHeaders({ token, userIdentifier, dido }) {
     "Sec-Fetch-Site": "same-site",
   };
   if (userIdentifier) h["UserIdentifier"] = userIdentifier;
-  if (dido) h["Cookie"] = `DIDO=${dido}`;
   return h;
 }
 
@@ -141,8 +115,6 @@ async function getMarketWatchInstrumentCatalog(env) {
 }
 
 async function getInstrumentCatalog(env) {
-  // This is the endpoint the current Agah web client actually uses for the
-  // user's instrument universe. InstrumentsWithNote is retained as fallback.
   try {
     const csv = await getMarketWatchInstrumentCatalog(env);
     if (csv.includes("NscId") && csv.includes("MarketTitle")) return csv;
@@ -223,7 +195,7 @@ export async function placeOrder(env, { categoryId, bankAccountId = 0, nscId, or
 
 export async function getAgahDiagnostics(env, nscId = "IRO1IKCO0001") {
   const auth = await getAuth(env);
-  const result = { tokenPresent: true, userIdentifierPresent: !!auth.userIdentifier, didoPresent: !!auth.dido, nscId, checks: {} };
+  const result = { tokenPresent: true, userIdentifierPresent: !!auth.userIdentifier, nscId, checks: {} };
   const now = Math.floor(Date.now() / 1000);
   const checks = [
     ["marketWatches", MARKET_WATCHES_URL],
