@@ -28,6 +28,15 @@ export default {
       if (url.pathname === "/api/symbols/search" && request.method === "GET") {
         return json(await searchSymbols(env, url.searchParams.get("q") || ""));
       }
+      if (url.pathname === "/api/test/agah-category" && request.method === "GET") {
+        const nscId = "IRO1IKCO0001";
+        const segmentation = await getLiveSegmentation(env, nscId);
+        return json({
+          ok: true,
+          nscId,
+          categoryId: findCategoryId(segmentation),
+        });
+      }
       if (url.pathname === "/api/watchlist" && request.method === "POST") {
         return json(await handleWatchlist(env, await request.json()));
       }
